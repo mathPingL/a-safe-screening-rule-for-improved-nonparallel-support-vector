@@ -1,0 +1,210 @@
+%INPSVM-qua-SSR
+clear 
+clc
+%% 导入数据
+% load('data_banknote.mat')
+%% 参数
+para.C1 = 10.^(-1:0.02:1);
+para.C2 = 10.^(-1:0.02:1);
+para.threshold = 1e-14; % 筛选阈值
+t=2.^(0:1:3);
+%% 生成训练集和测试集 A,B,U,即训练样本 五折交叉验证
+%generate_data会生成U类，为了都使用该函数,不做更改，U不使用即可
+nFold = 5;
+[n,p] = size(X);
+rng(2);
+c_out = cvpartition(n,'k',nFold);
+%% quad求解
+Acc = zeros(length(para.C1),length(t)*5);
+% 初始化 positive hyperplane
+Wposissr = zeros(p, length(para.C1));
+Timeposi = zeros(length(para.C1),length(t)*5);
+%初始化 negative hyperplane
+Wnegassr = zeros(p, length(para.C1));
+Timenega = zeros(length(para.C1),length(t)*5);
+
+
+Timep.scr=zeros(length(para.C1),length(t)*5);
+Timen.scr=zeros(length(para.C1),length(t)*5);
+Timep.solve=zeros(length(para.C1),length(t)*5);
+Timen.solve=zeros(length(para.C1),length(t)*5);
+scrp_ratio=zeros(length(para.C1),length(t)*5);
+scrn_ratio=zeros(length(para.C1),length(t)*5);
+scrp_ratio(1,:) = 0;
+scrn_ratio(1,:) = 0;
+Timep.scr(1,:) = 0;
+Timen.scr(1,:) = 0;
+Timep.solve(1,:) = 0;
+Timen.solve(1,:) = 0;
+%p表正类，n表负类
+% 开始求解
+%%
+
+for m = 1%:nFold
+    XTrain = X(training(c_out,m),:);
+    XTest = X(test(c_out,m),:);
+    [A, B, U, XTest, YTest] = generate_data(XTrain,XTest);
+    [ia,~] = size(A);
+    [ib,~] = size(B);
+    Alphaposi = zeros(ia+ia+ib, length(para.C1));
+    Alphanega = zeros(ib+ib+ia, length(para.C1));
+    YPred = ones(size(YTest,1),1);
+    for j=2%: length(t)
+        j
+            % positive hyperplane第一组参数直接求解
+            tp_solver=tic;
+            Zp = [A; -A; -B];
+            Hp = Zp*Zp';
+            fp = [zeros(ia+ia,1); -1*ones(ib,1)];
+            Aqua = [];
+            b = [];
+            Aeq = [];
+            beq = [];
+            lbp = zeros(ia+ia+ib,1);
+            ub = [para.C1(1)*ones(ia+ia,1); para.C1(1)/t(j)*ones(ib,1)];
+            alpha_p = quadprog(Hp, fp, Aqua, b, Aeq, beq, lbp, ub);
+            wp = Zp'*alpha_p;
+            Timeposi(1,j+(m-1)*length(t)) = toc(tp_solver);
+            Alphaposi(:,1) = alpha_p;
+            Wposissr(:,1) = wp;
+
+
+
+            %negative hyperplane 第一组参数直接求解
+            tn_solver=tic;
+            Zn = [B; -B; A];
+            Hn = Zn*Zn';
+            fn = [zeros(ib+ib,1); -1*ones(ia,1)];
+            Aqua = [];
+            b = [];
+            Aeq = [];
+            beq = [];
+            lbn = zeros(ib+ib+ia,1);
+            ub = [para.C1(1)*ones(ib+ib,1); para.C1(1)/t(j)*ones(ia,1)];
+            alpha_n = quadprog(Hn, fn, Aqua, b, Aeq, beq, lbn, ub);
+            wn = Zn'*alpha_n;
+            Timenega(1,j+(m-1)*length(t)) =toc(tn_solver);
+            Alphanega(:,1) = alpha_n;
+            Wnegassr(:,1) = wn;
+
+
+            %开始分类
+            distA=abs(XTest*Wposissr(:,1));
+            distB=abs(XTest*Wnegassr(:,1));
+            ind_posi=find(distA<distB);
+            ind_nega=find(distA>distB);
+            YPred(ind_posi)=1;
+            YPred(ind_nega)=-1;
+            acc = sum(YPred == YTest) / length(YTest);
+
+
+            % Sanity check - if labels are predicted wrongly then flip
+            if (acc<=0.5)
+                YPred=-1*YPred;
+                acc=(sum(YPred==YTest)/length(YTest));
+            end
+            Acc(1,j+(m-1)*length(t))=acc;
+
+            %%
+            %筛选从第二组参数开始，使用安全筛选准则
+            for i=2:length(para.C1)
+                i
+                %positive hyperplane
+
+                tp_0 = tic;
+                ind_R=(1:ia+ia+ib)';
+                P0 = [para.C1(i-1)*ones(ia+ia,1); para.C1(i-1)/t(j)*ones(ib,1)];
+                P = [para.C1(i)*ones(ia+ia,1); para.C1(i)/t(j)*ones(ib,1)];
+                LowBound = 1/2*Hp*(((P+P0)./P0).*Alphaposi(:,i-1))-1/2*sqrt(sum(Zp.^2,2))*norm(Zp'*(((P-P0)./P0).*Alphaposi(:,i-1)));
+                ind_0 = find(LowBound > -fp-para.threshold);
+                alpha_p(ind_0) = 0;
+                UpBound = 1/2*Hp*(((P+P0)./P0).*Alphaposi(:,i-1))+1/2*sqrt(sum(Zp.^2,2))*norm(Zp'*(((P-P0)./P0).*Alphaposi(:,i-1)));
+                ind_C = find(UpBound < -fp+para.threshold);
+                alpha_p(ind_C) = P(ind_C);
+                scrp_ratio(i,j+(m-1)*length(t)) = length([ind_0; ind_C]); %暂时存储数目
+                Timep.scr(i,j+(m-1)*length(t)) = toc(tp_0);
+
+                %求解子问题
+                tp_1=tic;
+                ind_R=setdiff(ind_R,[ind_0;ind_C]);
+                if(isempty(ind_R))
+                    Alphaposi(:,i)=alpha_p;
+                else
+                    Hp_RR = Zp(ind_R, :)*Zp(ind_R, :)';
+                    fp_R = Zp(ind_R, :)*Zp(ind_C, :)'*P(ind_C) + fp(ind_R);
+                    lbp_R = zeros(length(ind_R),1);
+                    ubp_R = P(ind_R);
+                    alpha_p(ind_R) = quadprog(Hp_RR, fp_R, Aqua, b, Aeq, beq, lbp_R, ubp_R);
+                    Alphaposi(:,i)=alpha_p;
+                end
+                wp = Zp'*alpha_p;
+                Timep.solve(i,j+(m-1)*length(t)) = toc(tp_1);
+                Wposissr(:,i)=wp;
+             
+
+
+                %negative hyperplane
+
+
+              
+                tn_0 = tic;
+                ind_R=(1:ib+ib+ia)';
+                P0 = [para.C1(i-1)*ones(ib+ib,1); para.C1(i-1)/t(j)*ones(ia,1)];
+                P = [para.C1(i)*ones(ib+ib,1); para.C1(i)/t(j)*ones(ia,1)];
+                LowBound = 1/2*Hn*(((P+P0)./P0).*Alphanega(:,i-1))-1/2*sqrt(sum(Zn.^2,2))*norm(Zn'*(((P-P0)./P0).*Alphanega(:,i-1)));
+                ind_0 = find(LowBound > -fn-para.threshold);
+                alpha_n(ind_0) = 0;
+                UpBound = 1/2*Hn*(((P+P0)./P0).*Alphanega(:,i-1))+1/2*sqrt(sum(Zn.^2,2))*norm(Zn'*(((P-P0)./P0).*Alphanega(:,i-1)));
+                ind_C = find(UpBound < -fn+para.threshold);
+                alpha_n(ind_C) = P(ind_C);
+                scrn_ratio(i,j+(m-1)*length(t)) = length([ind_0; ind_C]);
+                Timen.scr(i,j+(m-1)*length(t)) = toc(tn_0);
+
+                %求解子问题
+               
+                tn_1=tic;
+                ind_R=setdiff(ind_R,[ind_0;ind_C]);
+                if(isempty(ind_R))
+                    Alphanega(:,i)=alpha_n;
+                else
+                    Hn_RR = Zn(ind_R, :)*Zn(ind_R, :)';
+                    fn_R = Zn(ind_R, :)*Zn(ind_C, :)'*P(ind_C) + fn(ind_R);
+                    lbn_R = zeros(length(ind_R),1);
+                    ubn_R = P(ind_R);
+                    alpha_n(ind_R) = quadprog(Hn_RR, fn_R, Aqua, b, Aeq, beq, lbn_R, ubn_R);
+                end
+                wn = Zn'*alpha_n;
+                Timen.solve(i,j+(m-1)*length(t)) = toc(tn_1);
+                Alphanega(:,i)=alpha_n;
+                Wnegassr(:,i)=wn;
+
+                %开始分类
+                distA=abs(XTest*Wposissr(:,i));
+                distB=abs(XTest*Wnegassr(:,i));
+                ind_posi=find(distA<distB);
+                ind_nega=find(distA>distB);
+                YPred(ind_posi)=1;
+                YPred(ind_nega)=-1;
+                acc = sum(YPred == YTest) / length(YTest);
+
+
+                % Sanity check - if labels are predicted wrongly then flip
+                if (acc<=0.5)
+                    YPred=-1*YPred;
+                    acc=(sum(YPred==YTest)/length(YTest));
+                end
+                Acc(i,j+(m-1)*length(t))=acc;
+
+
+            end
+            ALPHANEga{j}=Alphanega;
+            ALPHAPOsi{j}=Alphaposi;
+    end
+ALPHANEGA{m}=ALPHANEga;
+ALPHAPOSI{m}=ALPHAPOsi;
+end
+
+
+    Time=Timen.solve+Timen.scr+Timep.solve+Timep.scr+Timenega+Timeposi;
+    SCR_ratio=(scrn_ratio+scrp_ratio)/(ia+ia+ib+ib+ib+ia);
+save('result_INPSVM_SSR_toy', 'SCR_ratio', 'Time','ALPHANEGA' ,'ALPHAPOSI','Timen','Timep','Acc')
